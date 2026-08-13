@@ -129,21 +129,28 @@ def _hr_ylim(traces, band: Tuple[float, float], pad: float = 0.1):
     return lo - margin, hi + margin
 
 
-def _agreement_stats(sot_t, sot_y, pred_t, pred_y) -> str:
+def _agreement_stats(sot_t, sot_y, pred_t, pred_y, grid_hz: float = 1.0) -> str:
     """Zero-lag agreement between two irregularly-sampled BPM traces, as a
     title suffix: Pearson r (pattern/collinearity) and mean absolute error in
-    BPM (magnitude difference), computed by interpolating the SOT trace onto
-    the predicted trace's timestamps over their overlap. A quick visual
-    sanity check, not a replacement for evaluate_v3's lag-searched score."""
+    BPM (magnitude difference). Both traces are resampled onto a common
+    uniform grid (``grid_hz``) before being compared -- the same algorithm as
+    the restructured pipeline's ``_pairwise_r``, just a coarser 1 Hz grid
+    instead of its 4 Hz default. A quick visual sanity check, not a
+    replacement for evaluate_v3's lag-searched score."""
     if sot_t.size < 2 or pred_t.size < 2:
         return ""
-    lo, hi = max(sot_t[0], pred_t[0]), min(sot_t[-1], pred_t[-1])
-    mask = (pred_t >= lo) & (pred_t <= hi)
-    if mask.sum() < 2:
+    lo, hi = max(float(sot_t[0]), float(pred_t[0])), min(float(sot_t[-1]), float(pred_t[-1]))
+    if hi <= lo:
         return ""
-    sot_on_pred = np.interp(pred_t[mask], sot_t, sot_y)
-    r = float(np.corrcoef(sot_on_pred, pred_y[mask])[0, 1])
-    mae = float(np.mean(np.abs(sot_on_pred - pred_y[mask])))
+    grid = np.arange(lo, hi, 1.0 / grid_hz)
+    if grid.size < 2:
+        return ""
+    sot_grid = np.interp(grid, sot_t, sot_y)
+    pred_grid = np.interp(grid, pred_t, pred_y)
+    if sot_grid.std() == 0 or pred_grid.std() == 0:
+        return ""
+    r = float(np.corrcoef(sot_grid, pred_grid)[0, 1])
+    mae = float(np.mean(np.abs(sot_grid - pred_grid)))
     return f"  |  r={r:.2f}, MAE={mae:.1f} bpm"
 
 
