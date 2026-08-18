@@ -52,6 +52,11 @@ def moving_average_v2(y, window):
     w = int(window)
     if w <= 1 or y.size == 0:
         return y.copy()
+    # np.convolve(..., mode="same") returns length max(len(y), len(kernel)), not len(y) --
+    # capping the window here keeps the kernel no longer than the data so the output always
+    # matches y's length, even when there are fewer beats than the window (e.g. a sparse
+    # maternal/PPG trace), which otherwise silently desyncs it from its own timestamps.
+    w = min(w, y.size)
     kernel = np.ones(w)
     counts = np.convolve(np.ones_like(y), kernel, mode="same") # points per window
     sums = np.convolve(y, kernel, mode="same")
