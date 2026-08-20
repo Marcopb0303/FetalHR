@@ -377,6 +377,54 @@ def plot_hr_comparison(
     plt.close()
 
 
+def plot_hr_before_after_correction(
+        fetal_result: fHROutput,
+        sot: SOTResult,
+        drift_log_path,
+        out: Path,
+        filename: str = "hr_comparison_before_after.png",
+) -> None:
+    """Two stacked fetal-only panels -- fiber HR vs NST/mic HR -- top using the
+    NST's beats as originally detected, bottom using them after NST clock-drift
+    correction (analyze.drift.correct_drift). Lets the effect of the correction
+    be read directly off one image instead of comparing two separate files."""
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+
+    corrected_sot = replace(sot, mic_beats=correct_drift(sot.mic_beats, drift_log_path))
+
+    t_start = sot.mic.time[0]
+    t_end = sot.mic.time[-1]
+
+    fig, (ax_before, ax_after) = plt.subplots(2, 1, figsize=_figsize(2), sharex=True,
+                                              constrained_layout=True)
+
+    _plot_hr_axis(
+        ax_before,
+        sot_beats=sot.mic_beats,
+        pred_beats=fetal_result.fetal_beats,
+        sot_color='tab:red', pred_color='tab:green',
+        sot_label='Mic (SOT)', pred_label='Fiber fetal',
+        title="Fetal instantaneous HR — before NST drift correction",
+        band=FETAL_BPM_RANGE,
+    )
+    _plot_hr_axis(
+        ax_after,
+        sot_beats=corrected_sot.mic_beats,
+        pred_beats=fetal_result.fetal_beats,
+        sot_color='tab:red', pred_color='tab:green',
+        sot_label='Mic (SOT, drift-corrected)', pred_label='Fiber fetal',
+        title="Fetal instantaneous HR — after NST drift correction",
+        band=FETAL_BPM_RANGE,
+    )
+
+    ax_after.set_xlabel("Time (s)", fontsize=8)
+    ax_after.set_xlim(t_start, t_end)
+    fig.suptitle("Raw bandpass fiber vs SOT — before/after NST drift correction", fontsize=11)
+    plt.savefig(out / filename, dpi=150)
+    plt.close()
+
+
 # ---------------------------------------------------------------------------
 # Pipeline stage factory
 # ---------------------------------------------------------------------------
@@ -415,6 +463,21 @@ def plot_hr_corrected(sot: SOTResult, drift_log_path, out: Path, filename: str =
 
     run_plot_hr_corrected.__name__ = "plot_hr_corrected"
     return run_plot_hr_corrected
+
+
+def plot_hr_correction_comparison(sot: SOTResult, drift_log_path, out: Path,
+                                   filename: str = "hr_comparison_before_after.png"):
+    """Pipeline stage: write the before/after-NST-drift-correction stacked
+    fetal HR plot (see ``plot_hr_before_after_correction``). Pass-through,
+    like ``plot_hr``."""
+
+    def run_plot_hr_correction_comparison(result):
+        fetal_result = getattr(result, "fetal_result", result)
+        plot_hr_before_after_correction(fetal_result, sot, drift_log_path, out, filename=filename)
+        return result
+
+    run_plot_hr_correction_comparison.__name__ = "plot_hr_correction_comparison"
+    return run_plot_hr_correction_comparison
 
 
 def plot_multi_hr(sot: SOTResult | None, out: Path):

@@ -19,19 +19,21 @@ from analyze.mnmf import run_mnmf
 from analyze.neossnet import run_neossnet_pipeline, run_neossnet_no_sot, run_neossnet_on_nst, run_neossnet_belly_machine
 from analyze.nmcf import run_nmcf
 from analyze.pipeline import Pipeline
-from analyze.plot_hr import plot_hr, plot_peaks
+from analyze.plot_hr import plot_hr, plot_hr_correction_comparison, plot_peaks
 from analyze.sot import load_sot, combine_sot_results
 from analyze.util import run_neossnet
-from constants import PROJECT_DIR, FETAL_ACOUSTIC_BAND_HZ, BROADBAND_FILTER_HZ, POWERLINE_NOTCH_HZ
+from constants import (
+    PROJECT_DIR, FETAL_ACOUSTIC_BAND_HZ, BROADBAND_FILTER_HZ, POWERLINE_NOTCH_HZ, NST_DRIFT_LOG_FILE,
+)
 
 # PATIENT = "fiber-vertical"
 # PATIENT = "fiber-horizontal"
-PATIENT = "PT12_2"
+PATIENT = "PT13_2"
 # PATIENT = "Patient 7"
 # PATIENT = "patient8-session1"
 # PATIENT = "session-02"
 # PATIENT = "band_durgan_1"
-WINDOW = 0, 657
+WINDOW = 0, 758
 # WINDOW = 220, 340
 # WINDOW = 60, 70
 # WINDOW = 10, 310
@@ -188,6 +190,9 @@ def run_raw_bandpass():
         use_fiber("1B"),
         fiber_beats(v7_beat_detector, Path(out)),
         plot_hr(sot.window(WINDOW[0], WINDOW[1]), out),
+        plot_hr_correction_comparison(
+            sot.window(WINDOW[0], WINDOW[1]), f"{Path(DATA_DIR) / NST_DRIFT_LOG_FILE}", out,
+        ),
         evaluate_v3(sot, out),
     ], f"{out}/cache")
 
@@ -242,7 +247,7 @@ if __name__ == '__main__':
         WINDOW,
         DATA_DIR,
     )
-    # run_raw_bandpass()
+    run_raw_bandpass()
     # run_funet_pipeline(
     #     PATIENT,
     #     WINDOW,
