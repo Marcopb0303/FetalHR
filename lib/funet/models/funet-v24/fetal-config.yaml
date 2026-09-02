@@ -6,6 +6,8 @@ model:
   codec_convolutions: 3   # conv-norm-relu blocks per encoder AND per decoder level (default 3)
   base_channels: 12
   dropout: 0.0
+  n_fft: 1024
+  hop_length: 256
 
 train:
   optimizer: 'AdamW'   # SGD, Adam, AdamW
@@ -20,16 +22,14 @@ train:
   # corr_amp only (ignored by other losses): d' rewards beats standing clear of a quiet floor.
   amp_weight: 0.1           # weight on the d' peak-contrast term; 0 = pure correlation (try 0.01-0.1)
   amp_beat_threshold: 0.1   # frac of per-item target peak above which a frame counts as a beat
-
-data:
-  train_dir: 'training/stereo_v7/fetal-train'
-  test_dir: 'training/stereo_v7/fetal-test'
-  num_workers: 8
-  n_fft: 1024
-  hop_length: 256
   augment: ['channel_dropout', 'gain', 'noise']
   # SpecAugment-style masks (train-only), max width of one zeroed band per sample; 0 = off.
   freq_mask: 0   # freq bins (of 512 kept); try ~40
   time_mask: 0   # time frames; keep < one beat interval (~6 frames at hop 256 / 4kHz), try 4-6
+
+data:
+  train_dir: 'training/stereo_v7/fetal-train'
+  val_dir: 'training/stereo_v7/fetal-test'
+  num_workers: 8
 
 model_dir: 'models/funet-v24/'

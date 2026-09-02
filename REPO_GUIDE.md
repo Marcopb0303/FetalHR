@@ -44,7 +44,7 @@ ICA/MNMF/MLCMED/NMCF are earlier/classical baselines kept for comparison.
 ```
 fhr-analysis/
 ├── setup.sh              Bootstraps the Python venv + submodules (see README)
-├── requirements.txt       Python deps for the main analysis code (src/)
+├── requirements.txt       Python deps for the analysis code (src/) and the models (lib/)
 ├── bin/                   Standalone data-collection apps (own venvs, PyQt GUIs)
 ├── lib/                   The separation/detection models: submodule + training code + checkpoints
 └── src/                   The main analysis library, CLI tools, and the beat-marking web app
@@ -108,17 +108,39 @@ lib/
 │                                   maternal-tuned-model-v2), each with model_best.pt +
 │                                   model.yaml (architecture config used for that checkpoint)
 │
+├── common/               Shared training/eval infrastructure, used by every model in lib/.
+│   │                     Not a model itself — it holds the parts that were duplicated
+│   │                     across FUNet and tune-ssnet until they were factored out.
+│   ├── config.py          Config dataclasses + the YAML loader (see "Config schema" below)
+│   ├── task.py            The seam each model implements (build model, loss, data)
+│   ├── engine.py          The training loop itself
+│   ├── losses.py          Beat-activity losses (SNR, correlation, corr_amp, MSE, KL-div)
+│   ├── metrics.py         HR-trace agreement between predicted activity and target
+│   ├── optim.py           Optimiser + LR schedule construction ('none'/'cosine'/'plateau')
+│   ├── augment.py         Random train-only waveform augmentation
+│   ├── preprocess.py      Deterministic transforms ('bandpass', 'normalize') applied to
+│   │                       every split AND to inference
+│   ├── audio.py           Snippet I/O, resampling, cropping/padding helpers
+│   ├── device.py / errors.py / io.py / diagnostics.py   Device pick, exceptions,
+│   │                       atomic writes + training-curve plots, end-of-run diagnostics
+│   └── phases/            The three things a model can do:
+│       ├── train.py        Build everything from a config and run the loop
+│       ├── inference.py    Load a checkpoint and run it over a long recording
+│       │                    (windowing, the activity readout — see below)
+│       └── optimize.py     Optuna hyperparameter search over any Task
+│
 ├── funet/                A custom model (FUNet) trained from scratch to output a
 │   │                     per-frame "beat activity" signal instead of a separated waveform
-│   ├── src/
+│   ├── funet/             The importable `funet` package (needs lib/funet on sys.path)
 │   │   ├── model.py       FUNet architecture (U-Net-style conv encoder/decoder)
-│   │   ├── train.py       Training loop
-│   │   ├── main.py        Training entry point (wires config → data → model → loss → train)
-│   │   ├── data.py        Dataset loading for FUNet's snippet format
-│   │   ├── augment.py     Data augmentation for training
-│   │   ├── loss.py        Loss functions (SNR, correlation, MSE, KL-div variants)
-│   │   ├── config.py      Config file schema/loader
+│   │   ├── config.py      FUNet's own config dataclasses, extending common.config
+│   │   ├── data.py        Dataset for FUNet's snippet format + the passband crop helper
+│   │   ├── task.py        Wires config → model → loss for common.engine
+│   │   ├── train.py       Training entry point (thin wrapper over common.phases.train)
+│   │   ├── optimize.py    Hyperparameter-search entry point
 │   │   └── inference.py   Runs a trained FUNet checkpoint on a raw waveform
+│   ├── src/               DEAD CODE — the pre-restructuring flat layout. Nothing imports
+│   │                       it; kept only so old runs can be reproduced. Edit funet/, not this.
 │   ├── fetal-config.yaml           Default training config (architecture + hyperparameters)
 │   ├── training_clips.yaml         Which recording windows/fibers to build snippets from
 │   ├── generate_training_snippets.sh  Builds the training snippet set
@@ -126,8 +148,8 @@ lib/
 │   │   ├── rough-pass-config.yaml / rough_pass_training_clips.yaml   stage 1: broad training
 │   │   ├── fine-pass-config.yaml / fine_pass_training_clips.yaml     stage 2: fine-tune stage 1's output
 │   │   └── intermediary/v1/, v2/  checkpoints saved between the two stages
-│   └── models/                    One folder per training run (funet-v1 … v32, plus a
-│                                   "(CONTROL)" baseline), each with fetal-config.yaml +
+│   └── models/                    One folder per training run (funet-v1 … v32, v34 … v36,
+│                                   plus a "(CONTROL)" baseline), each with fetal-config.yaml +
 │                                   model_best.pt / model_last.pt / training_curves.png
 │
 └── beats/                Hand-marked reference beat timestamps (.npy) for a few
@@ -136,10 +158,39 @@ lib/
 ```
 
 **Model versioning convention:** every training run gets its own numbered
-folder under `models/` (`funet-v32`, `tuned-model-v13`, …) so old checkpoints
+folder under `models/` (`funet-v36`, `tuned-model-v13`, …) so old checkpoints
 are never overwritten and results stay comparable across iterations. Which
 checkpoint is actually *used* by the analysis pipelines is selected in
 `src/constants.py` (`FUNET_MODEL`, `FETAL_MODEL`, etc. — see below).
+
+A checkpoint is only loadable together with the config beside it: the number of
+input channels, the spectrogram size and the passband crop all have to match the
+weights. Two differences worth knowing when switching versions:
+
+- **Channel count varies by version.** `funet-v24` is 5-channel, `funet-v36` is
+  3-channel. The fiber list passed to `run_funet_pipeline` must be the same
+  length as `config.model.channels`, or inference raises rather than guessing.
+- **v35 and v36 crop the spectrogram** to a passband (`model.freq_crop_hz`,
+  80–350 Hz) before the first convolution. Earlier versions leave it at full
+  height. This is why they cannot run under the old `lib/funet/src` code.
+
+### Config schema
+
+Configs are strict: an unknown key raises instead of being silently ignored, so
+a typo'd hyperparameter can't quietly keep its default. The three sections split
+along one rule — **if changing a field invalidates an existing checkpoint, it
+belongs in `model:`**.
+
+| Section | Holds | Examples |
+| --- | --- | --- |
+| `model:` | Architecture + the input contract | `channels`, `dilations`, `base_channels`, `n_fft`, `hop_length`, `freq_crop_hz` |
+| `train:` | The optimisation loop and regularisation | `optimizer`, `learning_rate`, `epochs`, `crop_len`, `loss`, `lr_schedule`, `augment`, `freq_mask`, `time_mask` |
+| `data:` | Where snippets live and how they load | `train_dir`, `val_dir`, `val_fraction`, `num_workers`, `preprocess` |
+
+Configs written for the older flat layout put `n_fft`/`hop_length` under `data:`,
+called the held-out split `test_dir`, and kept `augment`/`freq_mask`/`time_mask`
+in `data:`. Every config in this repo has been migrated; if you bring one in from
+elsewhere and it fails to load, that relocation is why.
 
 ---
 
@@ -157,7 +208,7 @@ src/
 ### `src/constants.py`
 
 The single place that picks **which trained model checkpoint each pipeline
-uses** (`FUNET_MODEL = "funet-v32"`, `FETAL_MODEL = "tuned-model-v13"`, etc.),
+uses** (currently `FUNET_MODEL = "funet-v24"`, `FETAL_MODEL = "tuned-model-v13"`),
 plus shared physical constants: acoustic frequency bands for filtering
 (maternal vs. fetal), BPM ranges used to sanity-check detected beats, device
 sample rates, and per-patient data file names (`MIC_BEATS_FILE`,
@@ -183,7 +234,10 @@ src/analyze/
 ├── mlcmed.py                 MLCMED separation
 ├── nmcf.py                  NMCF separation
 ├── neossnet.py               NeoSSNet deep-learning separation pipeline
-├── funet.py                  FUNet beat-activity model pipeline
+├── funet_runner.py           FUNet beat-activity model pipeline. Named *_runner, not
+│                            funet.py, so it cannot shadow the real `funet` package:
+│                            running src/analyze/main.py puts this directory on
+│                            sys.path[0], where a funet.py would be found first
 │
 ├── anc.py                    Adaptive noise cancellation (NLMS / Kalman) —
 │                            used after separation to cancel remaining maternal contamination
@@ -192,12 +246,13 @@ src/analyze/
 ├── clean_data_template.py     Template/scratch script for one-off data cleaning
 │
 ├── hr/                        Beat detection ("find heartbeat timestamps in a waveform")
-│   ├── detect.py … detect_v8.py   Eight detector versions (v1 through v8), each
-│   │                               a different peak-picking/segmentation strategy —
-│   │                               later versions generally supersede earlier ones,
-│   │                               kept side-by-side for comparison. Each file's
-│   │                               docstring explains why that version exists and
-│   │                               how it differs from its predecessor.
+│   ├── detect.py … detect_v9.py   Nine detector versions (v1 through v9), each
+│   │                               a different peak-picking/segmentation strategy.
+│   │                               Later versions do NOT simply supersede earlier
+│   │                               ones — which detector is best depends on the
+│   │                               signal (see "Choosing a beat detector" below).
+│   │                               Each file's docstring explains why that version
+│   │                               exists and how it differs from its predecessor.
 │   ├── classify.py             Given several candidate separated sources, picks
 │   │                            which one is "the fetal source"
 │   └── utils.py                 Shared beat-detection helpers
@@ -238,8 +293,9 @@ src/bin/
 ├── analyze/
 │   ├── analyze_waveforms.py (+ .sh)  Plots every waveform in a Banner_data
 │   │                                folder (sanity-check raw recordings)
-│   └── plot_clips.py (+ .sh)         Plots the fiber/SOT clips referenced by a
-│                                    training-snippet yaml (sanity-check training data)
+│   ├── plot_clips.py (+ .sh)         Plots the fiber/SOT clips referenced by a
+│   │                                training-snippet yaml (sanity-check training data)
+│   └── plot_ppg_window.py            Plots a time window of the PPG (pvs.npy) trace
 ├── peak_det/
 │   └── plot_peak_detectors.py (+ .sh)  Runs and compares every hr/ beat
 │                                      detector side-by-side on one patient
@@ -282,6 +338,12 @@ source .venv/bin/activate
 as top-level packages, so `src/` needs to be on `PYTHONPATH` — either
 `PYTHONPATH=src python src/analyze/main.py`, or run from inside `src/`.
 
+The model packages resolve the same way, at runtime rather than by install:
+`funet_runner.py` puts `lib/` and `lib/funet/` on `sys.path` so `import common.*`
+and `import funet.*` work, and `util.py` relies on `lib/neossnet` being importable
+for its bare `from utils import ...`. Nothing here is pip-installed, so the import
+names come entirely from those path entries.
+
 This creates `.venv`, installs `requirements.txt`, and fetches the
 `lib/neossnet` (and `bin/record/lib/pico`) git submodules. `bin/record*`
 apps have their own separate `requirements.txt` — install those into the
@@ -295,7 +357,7 @@ The main way to run an end-to-end analysis is `src/analyze/main.py`. It
 defines one function per separation method (`ica()`, `run_mlcmed_pipeline()`,
 `run_nmcf_pipeline()`, `run_mnmf_pipeline()`, `run_raw_bandpass()`, plus
 `run_funet_pipeline(...)` / `run_neossnet_pipeline(...)` imported from
-`analyze.funet` / `analyze.neossnet`). At the bottom of the file, under
+`analyze.funet_runner` / `analyze.neossnet`). At the bottom of the file, under
 `if __name__ == '__main__':`, the calls you want are left un-commented (most
 are commented out — that's the mechanism for choosing which pipeline(s) run).
 
@@ -331,42 +393,85 @@ stages whose upstream inputs actually changed are recomputed.
 - **Which patient recording / time window** → the `PATIENT` / `WINDOW`
   constants at the top of `main.py`.
 
-### How FUNet (v24) and the NST detector (v7) interact
+### The activity readout (FUNet inference)
 
-`main.py`'s current default run is `run_funet_pipeline` on `funet-v24` with
-`v7_beat_detector` (`src/analyze/hr/detect_v7.py`, a duration-dependent HMM
-Springer/Schmidt-style heart-sound segmenter). Both the NST/mic side and the
-fiber side of that pipeline call `v7_beat_detector`, but on two structurally
-different signals — worth spelling out:
+FUNet doesn't emit beat times. It emits one raw number per frame (about 15.6 per
+second at hop 256 on the 4 kHz model rate), those numbers can be negative, and
+their absolute scale isn't pinned by training. The last step of inference turns
+them into the non-negative envelope every beat detector expects. That step is the
+**readout**, and it is chosen from the training loss
+(`common.phases.inference.ACTIVITY_POSTPROCESS`):
 
-1. **NST/mic side** — `sot_beats(v7_beat_detector, out_path)` runs v7 on the
-   real microphone recording, band-limited to the fetal acoustic band. Its
-   output (`sot.mic_beats`) is the reference every fiber method is scored
-   against.
-2. **Fiber side** — `use_funet` (in `src/analyze/funet.py`) stacks the 5
-   abdomen fibers `1B, 2A, 2B, 2C, 2D` (funet-v24 is a 5-channel model — the
-   fiber count passed to `run_funet_pipeline` must match `FUNET_MODEL`'s
-   `config.model.channels`) into the FUNet U-Net (`lib/funet/src/model.py`).
-   FUNet's output isn't a cleaned-up *acoustic* waveform, it's a single-channel
-   **beat-activity envelope** — already shaped like a clean pulse train, one
-   bump per heartbeat, with the acoustic mixture stripped away. `fiber_beats`
-   then runs that *same* `v7_beat_detector` on this activity envelope (as the
-   "fetal" source) and, separately, on the raw maternal-band-filtered chest
-   fiber (as the "maternal" source).
+| `train.loss` | Readout | Why |
+| --- | --- | --- |
+| `kldiv` | `exp` | the forward pass already applied `log_softmax` |
+| `mse` | `clamp` | trained toward a unit-peak comb, so the raw output is already calibrated |
+| `snr`, `corr`, `corr_amp` | `standardize` | those losses are affine-invariant, so nothing pins scale or offset |
 
-So v7 plays double duty: once on genuine acoustic audio (the mic), once on a
-model-generated activity envelope with very different statistics. That's a
-deliberate choice — using one detector on both sides keeps the comparison in
-`hr_comparison.png` apples-to-apples, so an HR mismatch reflects FUNet's
-separation quality rather than a detector mismatch — but it also means v7's
-tuning (HMM state-duration priors, etc.) was designed around real heart-sound
-acoustics, not the sharper, denser envelope FUNet actually outputs.
+Older code applied a blanket softmax for every signal head. That was actively
+wrong for the affine-invariant losses — softmax responds to scale
+*exponentially*, so an output that drifted large collapsed toward an argmax — and
+lossy for `mse`, where it flattened calibrated peaks toward uniform.
 
-`funet.py` also defines `funet_beats()`, a peak-picker built specifically for
-FUNet's activity envelope (adaptive-threshold `find_peaks`, no HMM), but
-`run_funet_pipeline` does **not** call it — it's available if you want to
-compare v7's HMM-based picks against a simpler envelope-native peak-picker on
-the fiber side.
+This changes the envelope's **shape**, not just its scale, which is why it
+matters downstream: on `funet-v24` the median sample sits at 26% of the peak
+under `clamp` versus 67% under softmax. Inference also peak-normalises in
+**blocks** of one training crop rather than once over the whole recording
+(`normalize_blocks`), so a single loud transient can't shrink everything else.
+
+### Choosing a beat detector
+
+Detectors mainly differ in how they set their height floor, and that decides
+which signals they suit:
+
+- **v7** — Schmidt-style segmentation with transient suppression, gated on
+  constants chosen against real heart-sound acoustics.
+- **v2** — Hilbert envelope with a median + MAD floor, re-derived from the data.
+- **v9** — `v4` with the percentile height floor measured per 4-second block
+  instead of once over the whole recording.
+
+Measured on PT12_2 against a drift-corrected SOT (Pearson R at 1 Hz):
+
+| Pipeline | What the fiber detector sees | Best | Runner-up |
+| --- | --- | --- | --- |
+| FUNet | model activity envelope | **v9** (R +0.84) | v7 falls to +0.70 under the `clamp` readout |
+| Raw bandpass | bandpassed fiber acoustics | **v7** (R +0.83) | v9 falls to +0.33 |
+
+Same two detectors, opposite verdicts, for one reason: v9 *lowers* its gate
+inside quiet blocks. On FUNet's activity envelope a quiet block still contains
+real beats, so that recovers them. On raw acoustics a quiet block is quiet
+because there is noise and no clear beat, so it admits the noise — 17.7% of v9's
+intervals on the bandpassed fiber come out faster than 210 bpm, which is not
+physiologically possible. Don't assume a higher version number is an upgrade;
+measure it on the signal you actually have.
+
+**The SOT side stays on v7 everywhere.** It runs on the real microphone, which
+none of the model-side changes touch, and it is the yardstick every method is
+scored against — moving it silently invalidates comparison with every earlier run.
+
+### Current wiring
+
+| Pipeline | SOT detector | Fiber detector | Model |
+| --- | --- | --- | --- |
+| `run_funet_pipeline` | v7 | **v9** | `FUNET_MODEL` (funet-v24 → 5 fibers) |
+| `run_raw_bandpass` | v7 | v7 | none |
+| `run_neossnet_pipeline` | v7 | v7 | `FETAL_MODEL` |
+
+`use_funet` (in `src/analyze/funet_runner.py`) stacks the abdomen fibers passed
+to `run_funet_pipeline` as channels and runs them through the U-Net in
+`lib/funet/funet/model.py`. The fiber list must be as long as
+`config.model.channels` — `main.py` passes all five (`1B, 2A, 2B, 2C, 2D`) for
+the 5-channel funet-v24, overriding the function's 3-fiber default.
+
+`run_raw_bandpass` additionally runs a second branch with v9 on *both* sides,
+writing only `hr_comparison_before_after_v9.png`, so the v9 variant can be
+eyeballed without disturbing the scored v7 baseline. It uses its own cache keys
+(`sot_v9`, `cache_v9`) — sharing them would make `Pipeline` hand back the v7
+run's cached results and produce two identical plots.
+
+`funet_runner.py` also defines `funet_beats()`, a peak-picker built specifically
+for FUNet's activity envelope (adaptive-threshold `find_peaks`, no HMM), but no
+pipeline calls it — it's there if you want another point of comparison.
 
 ---
 
@@ -399,9 +504,17 @@ time_s,seconds_lost
 shifts the beat later by that cumulative amount. `run_funet_pipeline` and
 `run_neossnet_pipeline` both run this automatically and write a **second**,
 separate plot — `hr_comparison_corrected.png` — alongside the original
-`hr_comparison.png`, so corrected vs. uncorrected can be compared directly. If
-`nst_dropouts.csv` doesn't exist for a patient, the corrected plot is a no-op
-copy of the original.
+`hr_comparison.png`, so corrected vs. uncorrected can be compared directly.
+`run_raw_bandpass` writes the stacked before/after version instead, as
+`hr_comparison_before_after.png` (plus `hr_comparison_before_after_v9.png` from
+its v9 branch). If `nst_dropouts.csv` doesn't exist for a patient, the corrected
+plot is a no-op copy of the original.
+
+**This correction dominates every other effect in the pipeline.** On PT12_2 it
+shifts the last beat of a 644 s window by **+18.5 s**, and fetal-HR agreement
+goes from R ≈ 0.45 uncorrected to R ≈ 0.83 corrected. Any score compared against
+a run without the drift log is not comparable at all — check which one you are
+looking at before reading anything into a difference.
 
 ---
 
@@ -416,12 +529,17 @@ training snippets → train → point `constants.py` at the new checkpoint.**
 # 1. Build training snippets from lib/funet/training_clips.yaml
 ./lib/funet/generate_training_snippets.sh
 
-# 2. Train
-.venv/bin/python lib/funet/src/main.py lib/funet/fetal-config.yaml
+# 2. Train (lib and lib/funet must be importable — see Setup)
+PYTHONPATH=lib:lib/funet .venv/bin/python -m funet.train lib/funet/fetal-config.yaml
+
+# Optional: Optuna hyperparameter search instead of a single run
+PYTHONPATH=lib:lib/funet .venv/bin/python -m funet.optimize lib/funet/fetal-config.yaml
 ```
 Checkpoints land in the config's `model_dir` (convention: a new
-`lib/funet/models/funet-vN/` per run). An alternative "rough pass, then fine
-pass" recipe lives in `lib/funet/rfp_train/` for staged training.
+`lib/funet/models/funet-vN/` per run), alongside a copy of the config that
+produced them — so a run directory is self-contained and can be pointed at
+directly. An alternative "rough pass, then fine pass" recipe lives in
+`lib/funet/rfp_train/` for staged training.
 
 ### NeoSSNet fine-tuning
 
@@ -451,7 +569,7 @@ pick it up.
   `src/bin/analyze/analyze_waveforms.sh <patient_dir>` to plot every channel.
 - **Compare beat detectors on one recording:**
   `src/bin/peak_det/plot_peak_detectors.sh <patient>` to run all of
-  `hr/detect_v1`…`v8` side-by-side against the hand-marked SOT.
+  `hr/detect_v1`…`v9` side-by-side against the hand-marked SOT.
 - **Check signal quality:** `src/bin/snr/calculate_snr.sh <patient_dir>`.
 - **Create/correct ground-truth beat marks:** `python3 src/beat_app/server.py`.
 - **Fix a recording that started late, or splice two recordings together:**

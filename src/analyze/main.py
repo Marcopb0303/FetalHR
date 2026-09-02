@@ -2,17 +2,19 @@ from pathlib import Path
 
 from analyze.anc import fetal_anc
 from analyze.data import FiberData, load_data, windowed, use_fiber, load_no_chest_data
+from analyze.demodulation import run_demodulation_pipeline
 from analyze.evaluate import evaluate, combine_evaluations, plot_evaluation
 from analyze.evaluate_v2 import evaluate_v2
 from analyze.evaluate_v3 import evaluate_v3
 from analyze.filters import abdomen_bp, bp, notch
-from analyze.funet import run_funet_pipeline, run_funet_belly_machine, run_funet_no_sot
+from analyze.funet_runner import run_funet_pipeline, run_funet_belly_machine, run_funet_no_sot
 from analyze.hr import fiber_beats, sot_beats
 from analyze.hr.classify import classify_sources
 from analyze.hr.detect import v1_beat_detector
 from analyze.hr.detect_v2 import v2_beat_detector
 from analyze.hr.detect_v3 import v3_beat_detector
 from analyze.hr.detect_v7 import v7_beat_detector
+from analyze.hr.detect_v9 import v9_beat_detector
 from analyze.ica import load_ica_data, prepare_signals, run_ica
 from analyze.mlcmed import run_mlcmed
 from analyze.mnmf import run_mnmf
@@ -33,7 +35,8 @@ PATIENT = "PT13_2"
 # PATIENT = "patient8-session1"
 # PATIENT = "session-02"
 # PATIENT = "band_durgan_1"
-WINDOW = 0, 758
+WINDOW = 0, 740
+
 # WINDOW = 220, 340
 # WINDOW = 60, 70
 # WINDOW = 10, 310
@@ -196,7 +199,31 @@ def run_raw_bandpass():
         evaluate_v3(sot, out),
     ], f"{out}/cache")
 
-    band_pipe.process(DATA_DIR)
+    result = band_pipe.process(DATA_DIR)
+
+    # Same signal path with v9 on both sides, for comparison only. It scores far below v7
+    # here (R +0.33 vs +0.83 on PT12_2): v9's per-block floor recovers beats on FUNet's
+    # activity envelope, but on raw acoustics it lets noise through in quiet stretches.
+    # Separate cache keys, or the Pipeline hands back the v7 run's results.
+    sot_v9 = Pipeline([
+        load_sot(),
+        windowed(WINDOW[0], WINDOW[1]),
+        sot_beats(v9_beat_detector, Path(out)),
+    ], f"{out}/sot_v9").process(DATA_DIR)
+
+    Pipeline([
+        load_data,
+        windowed(WINDOW[0], WINDOW[1]),
+        FiberData.apply(bp(*FETAL_ACOUSTIC_BAND_HZ, "butter")),
+        use_fiber("1B"),
+        fiber_beats(v9_beat_detector, Path(out)),
+        plot_hr_correction_comparison(
+            sot_v9.window(WINDOW[0], WINDOW[1]), f"{Path(DATA_DIR) / NST_DRIFT_LOG_FILE}", out,
+            filename="hr_comparison_before_after_v9.png",
+        ),
+    ], f"{out}/cache_v9").process(DATA_DIR)
+
+    return result
 
 
 def run_raw_bandpass_no_sot():
@@ -232,6 +259,17 @@ def run_raw_bandpass_no_sot():
 # - mark both s1 / s2 on impulses
 
 if __name__ == '__main__':
+    # Carrier-demodulation experiment (analyze/demodulation.py). Independent of everything
+    # below: own output directory, cache keys and detector diagnostics.
+    run_demodulation_pipeline(
+        PATIENT,
+        WINDOW,
+        DATA_DIR,
+        # Start of the 3 s full-rate excerpt in bandpass_fiber.html rows 3-4, the only
+        # panels that resolve the carrier. None centres it on the median beat.
+        zoom_start_s=100.0,
+    )
+
     # for fibers in (["1B", "2A"],["2A", "2B"],["2B", "1B"]):
     # run_funet_no_sot(
     #     PATIENT, WINDOW, DATA_DIR,

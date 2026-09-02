@@ -1,4 +1,8 @@
-"""Pipeline for the FUNet beat-activity model (lib/funet).
+"""Pipeline for the FUNet beat-activity model (the `funet` package, lib/funet/funet).
+
+Named funet_runner rather than funet so it cannot shadow that package: `python
+src/analyze/main.py` puts this directory on sys.path[0], and a module named funet.py
+here would be found before the real package.
 
 Unlike the NeoSSNet pipeline -- which separates a heart *waveform* and then runs an
 acoustic beat detector on it -- FUNet directly predicts a per-frame beat activity
@@ -26,6 +30,7 @@ from analyze.hr.detect_v2 import v2_beat_detector
 from analyze.hr.detect_v5 import v5_beat_detector
 from analyze.hr.detect_v7 import v7_beat_detector
 from analyze.hr.detect_v8 import v8_beat_detector
+from analyze.hr.detect_v9 import v9_beat_detector
 from analyze.pipeline import Pipeline
 from analyze.plot_hr import plot_hr, plot_hr_corrected, plot_hr_multi_comparison
 from analyze.sot import load_sot, load_sot_no_ppg, plot_mic, SOTResult
@@ -34,10 +39,14 @@ from constants import (
     NST_DRIFT_LOG_FILE,
 )
 
-# lib/funet/src is a flat module dir (bare imports); put it on the path to import from.
-sys.path.insert(0, str(Path(PROJECT_DIR) / "lib" / "funet" / "src"))
-from config import load_config  # noqa: E402
-from inference import load_funet, run_funet  # noqa: E402
+# The `funet` package lives at lib/funet/funet and imports `common` from lib/common, so
+# both parent directories go on the path. lib/funet first: lib is also a parent of the
+# non-package directory lib/funet, and putting the real package's root ahead of it keeps
+# the regular package unambiguously ahead of any namespace-package interpretation.
+sys.path.insert(0, str(Path(PROJECT_DIR) / "lib"))
+sys.path.insert(0, str(Path(PROJECT_DIR) / "lib" / "funet"))
+from funet.config import load_config  # noqa: E402
+from funet.inference import load_funet, run_funet  # noqa: E402
 
 
 def _pick_device() -> torch.device:
@@ -174,7 +183,11 @@ def run_funet_pipeline(patient, window, datadir, fibers=["1B", "2A", "2B"]):
                   #            "2C", "2D"
                   # ]
                   ),
-        fiber_beats(v7_beat_detector, out_path),
+        # v9, not v7: the readout for an mse model is now a clamp, whose envelope sits on a
+        # much lower floor than the old softmax one (median at 26% of peak, not 67%). v7
+        # gates on constants chosen against the shallow envelope and drops real beats on the
+        # deep one; v9 re-derives its floor per block, so it follows whatever it is handed.
+        fiber_beats(v9_beat_detector, out_path),
         plot_hr(sot, out_path),
         plot_hr_corrected(sot, f"{Path(datadir) / NST_DRIFT_LOG_FILE}", out_path),
         # evaluate_v2(sot, out_path),

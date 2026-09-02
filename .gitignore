@@ -1,4 +1,6 @@
 .out
+.DS_Store
+__pycache__/
 Banner_data/*
 lib/tune-ssnet/training/*
 .venv

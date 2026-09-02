@@ -5,6 +5,8 @@ model:
   bottleneck_dilation: 1
   bottleneck_convs: 3
   base_channels: 32
+  n_fft: 1024
+  hop_length: 256
 
 # training (see train() in src/train.py)
 train:
@@ -18,10 +20,8 @@ train:
 
 data:
   train_dir: '../training/stereo_v1/fetal-train'
-  test_dir: '../training/stereo_v1/fetal-test'
+  val_dir: '../training/stereo_v1/fetal-test'
   num_workers: 8
-  n_fft: 1024
-  hop_length: 256
 
 model_dir: '../models/funet-v2/'
 #resume: '../models/funet-v1/model_best.pt'

@@ -28,12 +28,14 @@ multiprocess==0.70.19
 networkx==3.6.1
 numpy==2.4.6
 numpy-typing-compat==20251206.2.4
+optuna==4.9.0
 optype==0.17.1
 packaging==26.2
 pandas==3.0.3
 pathos==0.3.5
 pillow==12.2.0
 Pint==0.25
+plotly==7.0.0
 platformdirs==4.4.0
 playsound3==3.3.1
 pluggy==1.6.0
