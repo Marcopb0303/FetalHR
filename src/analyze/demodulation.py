@@ -33,7 +33,7 @@ from analyze.pipeline import Pipeline
 # Private, but these are the repo's HR-comparison format -- the same helpers
 # plot_hr_comparison composes, so the figures here match it instead of reimplementing it.
 from analyze.plot_hr import (
-    _agreement_stats, _current_hr_func, _figsize, _hr_ylim, _plot_hr_axis,
+    _agreement_stats, _agreement_values, _current_hr_func, _figsize, _hr_ylim, _plot_hr_axis,
 )
 from analyze.sot import SOTResult, load_sot
 from constants import FETAL_BPM_RANGE, NST_DRIFT_LOG_FILE, PROJECT_DIR
@@ -53,6 +53,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - environment guard
 # ---------------------------------------------------------------------------
 
 DEMOD_FIBER = "belly_1B"          # _resolve_fiber strips the "belly_" to get "1B"
+DEMOD_FIBERS = ("1B", "2A", "2B", "2C", "2D")
 DEMOD_BANDPASS_HZ = (200.0, 230.0)
 DEMOD_BANDPASS_ORDER = 4
 
@@ -77,6 +78,22 @@ HR_SMOOTH_WINDOW = 20             # must match the window _inst_hr_v2 hardcodes
 # Result container
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class DemodulationAgreement:
+    """One v7 mode vs corrected NST, using the existing smoothed HR score.
+
+    Full precision is retained; CSV and optimized figure share the legacy display
+    precision via ``display_values``. Undefined agreement is represented by NaN.
+    """
+
+    r: float
+    mae: float
+
+    @property
+    def display_values(self) -> Tuple[str, str]:
+        return f"{self.r:.2f}", f"{self.mae:.1f}"
+
+
 @dataclass
 class DemodulationResult:
     """Everything the demodulation produced, accumulated through the pipeline stages."""
@@ -96,6 +113,8 @@ class DemodulationResult:
     envelope_aware: Optional[fHROutput] = None
     non_aware: Optional[fHROutput] = None
     bandpass_only: Optional[fHROutput] = None   # control: v7 on x_BP(t), no demodulation
+    agreement: Optional[DemodulationAgreement] = None
+    non_aware_agreement: Optional[DemodulationAgreement] = None
 
 
 # ---------------------------------------------------------------------------
@@ -728,7 +747,8 @@ def _write_no_outlier_comparison(result: DemodulationResult, sot: SOTResult,
 
 
 def _write_hr_comparison(result: DemodulationResult, demod_output: fHROutput,
-                         sot: SOTResult, out: Path, filename: str, mode_label: str) -> None:
+                         sot: SOTResult, out: Path, filename: str, mode_label: str,
+                         optimized_patient: Optional[str] = None) -> None:
     """Outputs 2 and 3: bandpassed-fiber v7 HR on top, demodulated v7 HR below.
 
     The top panel was the maternal one and sat blank here, since this experiment has no
@@ -769,6 +789,16 @@ def _write_hr_comparison(result: DemodulationResult, demod_output: fHROutput,
         f"({mode_label} v7), fiber {result.fiber}",
         fontsize=11,
     )
+    if optimized_patient is not None:
+        non_aware = mode_label == "non-aware"
+        agreement = result.non_aware_agreement if non_aware else result.agreement
+        r, mae = agreement.display_values
+        mode_suffix = " (non-aware v7)" if non_aware else ""
+        fig.suptitle(
+            f"{optimized_patient} — Optimized Demodulation{mode_suffix}\n"
+            f"Fiber {result.fiber} | Band {low:g}–{high:g} Hz | R={r} | MAE={mae} BPM",
+            fontsize=11,
+        )
     plt.savefig(out / filename, dpi=150)
     plt.close()
 
@@ -776,12 +806,16 @@ def _write_hr_comparison(result: DemodulationResult, demod_output: fHROutput,
 def demodulation_plots(sot: SOTResult, drift_log_path, out: Path,
                        zoom_start_s: Optional[float] = ZOOM_START_S,
                        zoom_span_s: float = ZOOM_SPAN_S,
-                       reject_hr_outliers: bool = False):
+                       reject_hr_outliers: bool = False,
+                       write_hr_comparisons: bool = True):
     """Pipeline stage: write the experiment's outputs. Pass-through.
 
     ``reject_hr_outliers`` adds a fifth file, ``hr_comparison_no_outlier.png``, and changes
     nothing else -- the four standard outputs, the other two traces and the NST branch are
     all produced exactly as they are with the flag off.
+
+    ``write_hr_comparisons=False`` keeps the HTML diagnostics but suppresses the
+    two baseline HR filenames for an optimized run.
     """
 
     def run_demodulation_plots(result: DemodulationResult) -> DemodulationResult:
@@ -792,10 +826,11 @@ def demodulation_plots(sot: SOTResult, drift_log_path, out: Path,
         corrected_sot = replace(sot, mic_beats=correct_drift(sot.mic_beats, drift_log_path))
 
         _write_demodulated_html(result, out_path / "demodulated_fiber.html")
-        _write_hr_comparison(result, result.envelope_aware, corrected_sot, out_path,
-                             "hr_comparison_demodulated.png", "envelope-aware")
-        _write_hr_comparison(result, result.non_aware, corrected_sot, out_path,
-                             "hr_comparison_demodulated_non_aware.png", "non-aware")
+        if write_hr_comparisons:
+            _write_hr_comparison(result, result.envelope_aware, corrected_sot, out_path,
+                                 "hr_comparison_demodulated.png", "envelope-aware")
+            _write_hr_comparison(result, result.non_aware, corrected_sot, out_path,
+                                 "hr_comparison_demodulated_non_aware.png", "non-aware")
         _write_bandpass_html(result, out_path / "bandpass_fiber.html",
                              zoom_span_s=zoom_span_s, zoom_start_s=zoom_start_s)
 
@@ -834,6 +869,7 @@ def run_demodulation_pipeline(
         baseband_hz: float = DEMOD_BASEBAND_HZ,
         zoom_start_s: Optional[float] = ZOOM_START_S,
         reject_hr_outliers: bool = False,
+        optimized: bool = False,
 ) -> DemodulationResult:
     """End-to-end: fiber -> bandpass -> two-pass demodulation -> two v7 modes -> plots.
 
@@ -843,13 +879,29 @@ def run_demodulation_pipeline(
     ``reject_hr_outliers`` is off by default and purely additive -- it writes one extra
     figure from the envelope-aware trace and touches nothing else.
 
+    ``agreement`` and ``non_aware_agreement`` on the returned result contain the
+    two modes' HR comparison statistics (before optional outlier rejection).
+    ``optimized=True`` writes ``hr_comparison_optimized.png`` (envelope-aware)
+    and ``hr_comparison_optimized_nonaware.png`` (non-aware), and isolates all
+    other artifacts under ``optimized/``. It never
+    writes the baseline comparison files. The batch caller runs the fixed baseline
+    separately on the same window.
+
     Writes only under ``.out/<patient>/demodulation/``. Detector diagnostics go to
     ``diagnostics/``, one subdirectory per mode, since v7 writes the same
     ``detect_v7_fetal.png`` filename every time.
     """
+    name = _resolve_fiber(fiber)
+    if name not in DEMOD_FIBERS:
+        raise ValueError(f"fiber must be one of {', '.join(DEMOD_FIBERS)}; got {fiber!r}")
+    low, high = bandpass_hz
+    if not (np.isfinite(low) and np.isfinite(high) and 0 < low < high):
+        raise ValueError("acoustic band must satisfy 0 < low_hz < high_hz (finite Hz)")
+
     out_path = Path(f"{PROJECT_DIR}.out/{patient}/demodulation/")
     out_path.mkdir(parents=True, exist_ok=True)
-    diagnostics = out_path / "diagnostics"
+    artifacts = out_path / "optimized" if optimized else out_path
+    diagnostics = artifacts / "diagnostics"
 
     # Reference branch: NST mic -> v7 -> drift correction, untouched, but on its own cache
     # key so it cannot collide with the raw-bandpass or FUNet SOT caches.
@@ -857,7 +909,7 @@ def run_demodulation_pipeline(
         load_sot(),
         windowed(window[0], window[1]),
         sot_beats(v7_beat_detector, diagnostics / "sot"),
-    ], f"{out_path}/cache_demodulation_sot/", play_sound=False).process(datadir)
+    ], f"{artifacts}/cache_demodulation_sot/", play_sound=False).process(datadir)
 
     result = Pipeline([
         load_data,
@@ -866,12 +918,35 @@ def run_demodulation_pipeline(
         demodulation_envelope_aware_beats(diagnostics / "envelope_aware"),
         demodulation_non_aware_beats(diagnostics / "non_aware"),
         demodulation_bandpass_v7_beats(diagnostics / "bandpass_only"),
-        demodulation_plots(sot, f"{Path(datadir) / NST_DRIFT_LOG_FILE}", out_path,
+        demodulation_plots(sot, f"{Path(datadir) / NST_DRIFT_LOG_FILE}", artifacts,
                            zoom_start_s=zoom_start_s,
-                           reject_hr_outliers=reject_hr_outliers),
-    ], f"{out_path}/cache_demodulation/", play_sound=False).process(datadir)
+                           reject_hr_outliers=reject_hr_outliers,
+                           write_hr_comparisons=not optimized),
+    ], f"{artifacts}/cache_demodulation/", play_sound=False).process(datadir)
 
     corrected_sot = correct_drift(sot.mic_beats, f"{Path(datadir) / NST_DRIFT_LOG_FILE}")
+    st, sy = _current_hr_func()(np.asarray(corrected_sot, float), FETAL_BPM_RANGE)
+
+    def agreement_for(output):
+        pt, py = _current_hr_func()(output.fetal_beats, FETAL_BPM_RANGE)
+        values = _agreement_values(st, sy, pt, py)
+        return DemodulationAgreement(
+            *(values if values is not None else (float("nan"), float("nan")))
+        )
+
+    result = replace(result, agreement=agreement_for(result.envelope_aware),
+                     non_aware_agreement=agreement_for(result.non_aware))
+    if optimized:
+        _write_hr_comparison(
+            result, result.envelope_aware, replace(sot, mic_beats=corrected_sot),
+            out_path, "hr_comparison_optimized.png", "envelope-aware",
+            optimized_patient=patient,
+        )
+        _write_hr_comparison(
+            result, result.non_aware, replace(sot, mic_beats=corrected_sot),
+            out_path, "hr_comparison_optimized_nonaware.png", "non-aware",
+            optimized_patient=patient,
+        )
     rows = (
         ("NST reference (v7, drift-corrected)", corrected_sot, ""),
         ("bandpass control (v7)", result.bandpass_only.fetal_beats,
@@ -897,10 +972,15 @@ def run_demodulation_pipeline(
     for label, beats, stat in rows:
         print(f"  {label:<36}{len(beats):>7}   {stat}")
     print("-" * 72)
-    written = ["demodulated_fiber.html", "hr_comparison_demodulated.png",
-               "hr_comparison_demodulated_non_aware.png", "bandpass_fiber.html"]
+    written = ["demodulated_fiber.html", "bandpass_fiber.html"] if optimized else [
+        "demodulated_fiber.html", "hr_comparison_demodulated.png",
+        "hr_comparison_demodulated_non_aware.png", "bandpass_fiber.html"]
     if reject_hr_outliers:
         written.append("hr_comparison_no_outlier.png")
+    if optimized:
+        written = [f"optimized/{name}" for name in written]
+        written.append("hr_comparison_optimized.png")
+        written.append("hr_comparison_optimized_nonaware.png")
     for name in written:
         print(f"  {name}")
     print(f"  in {out_path.resolve()}")

@@ -30,12 +30,12 @@ from constants import (
 
 # PATIENT = "fiber-vertical"
 # PATIENT = "fiber-horizontal"
-PATIENT = "PT13_2"
-# PATIENT = "Patient 7"
+# PATIENT = "PT13_2"
+PATIENT = "Patient 6"
 # PATIENT = "patient8-session1"
 # PATIENT = "session-02"
 # PATIENT = "band_durgan_1"
-WINDOW = 0, 740
+WINDOW = 0, 800
 
 # WINDOW = 220, 340
 # WINDOW = 60, 70
